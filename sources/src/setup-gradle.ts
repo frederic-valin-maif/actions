@@ -5,6 +5,7 @@ import * as path from 'path'
 import * as os from 'os'
 import * as jobSummary from './job-summary'
 import * as buildScan from './develocity/build-scan'
+import {setupToken} from './develocity/short-lived-token'
 
 import {loadBuildResults, markBuildResultsProcessed} from './build-results'
 import {getCacheService, getProviderNote} from './cache-service-loader'
@@ -21,6 +22,8 @@ import {initializeGradleUserHome} from './gradle-user-home'
 
 const GRADLE_SETUP_VAR = 'GRADLE_BUILD_ACTION_SETUP_COMPLETED'
 const GRADLE_USER_HOME = 'GRADLE_USER_HOME'
+// Short-lived Develocity token for the configured server, resolved during setup and reused on save.
+const DEVELOCITY_CACHE_TOKEN = 'DEVELOCITY_CACHE_TOKEN'
 
 export async function setup(
     cacheConfig: CacheConfig,
@@ -44,17 +47,27 @@ export async function setup(
 
     initializeGradleUserHome(userHome, gradleUserHome, cacheConfig.getCacheEncryptionKey())
 
+    // Exchange the long-lived access key(s) for short-lived tokens, resolving the token for the
+    // configured Develocity server and retaining it for the post-action (save) step.
+    const develocityServerUrl = develocityConfig.getDevelocityUrl() || undefined
+    const cacheToken = await setupToken(develocityConfig)
+    core.saveState(DEVELOCITY_CACHE_TOKEN, cacheToken ?? '')
+
     const cacheService = await getCacheService(cacheConfig)
-    await cacheService.restore(gradleUserHome, cacheOptionsFrom(cacheConfig))
+    await cacheService.restore(gradleUserHome, cacheOptionsFrom(cacheConfig, develocityServerUrl, cacheToken))
 
     await wrapperValidator.validateWrappers(wrapperValidationConfig, getWorkspaceDirectory(), gradleUserHome)
 
-    await buildScan.setup(develocityConfig)
+    buildScan.setup(develocityConfig)
 
     return true
 }
 
-export async function complete(cacheConfig: CacheConfig, summaryConfig: SummaryConfig): Promise<boolean> {
+export async function complete(
+    cacheConfig: CacheConfig,
+    develocityConfig: DevelocityConfig,
+    summaryConfig: SummaryConfig
+): Promise<boolean> {
     if (!core.getState(GRADLE_SETUP_VAR)) {
         core.info('Gradle setup post-action only performed for first gradle/actions step in workflow.')
         return false
@@ -64,8 +77,14 @@ export async function complete(cacheConfig: CacheConfig, summaryConfig: SummaryC
     const buildResults = loadBuildResults()
 
     const gradleUserHome = core.getState(GRADLE_USER_HOME)
+    const develocityServerUrl = develocityConfig.getDevelocityUrl() || undefined
+    const cacheToken = core.getState(DEVELOCITY_CACHE_TOKEN) || undefined
     const cacheService = await getCacheService(cacheConfig)
-    const cacheReport = await cacheService.save(gradleUserHome, buildResults, cacheOptionsFrom(cacheConfig))
+    const cacheReport = await cacheService.save(
+        gradleUserHome,
+        buildResults,
+        cacheOptionsFrom(cacheConfig, develocityServerUrl, cacheToken)
+    )
     await jobSummary.generateJobSummary(buildResults, cacheReport, getProviderNote(cacheConfig), summaryConfig)
 
     markBuildResultsProcessed()
@@ -75,7 +94,11 @@ export async function complete(cacheConfig: CacheConfig, summaryConfig: SummaryC
     return true
 }
 
-function cacheOptionsFrom(config: CacheConfig): CacheOptions {
+function cacheOptionsFrom(
+    config: CacheConfig,
+    develocityServerUrl: string | undefined,
+    develocityAccessToken: string | undefined
+): CacheOptions {
     return {
         disabled: config.isCacheDisabled(),
         readOnly: config.isCacheReadOnly(),
@@ -84,6 +107,8 @@ function cacheOptionsFrom(config: CacheConfig): CacheOptions {
         strictMatch: config.isCacheStrictMatch(),
         cleanup: config.getCacheCleanupOption(),
         encryptionKey: config.getCacheEncryptionKey() || undefined,
+        develocityAccessToken,
+        develocityServerUrl,
         includes: config.getCacheIncludes(),
         excludes: config.getCacheExcludes()
     }

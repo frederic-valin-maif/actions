@@ -1,7 +1,7 @@
 import nock from "nock";
 import {describe, expect, it} from '@jest/globals'
 
-import {DevelocityAccessCredentials, getToken} from "../../src/develocity/short-lived-token";
+import {DevelocityAccessCredentials, getToken, resolveTokenForServer} from "../../src/develocity/short-lived-token";
 
 describe('short lived tokens', () => {
     it('parse valid access key should return an object', async () => {
@@ -132,5 +132,44 @@ describe('short lived tokens with retry', () => {
         await expect(getToken('dev=xyz', false, ''))
             .resolves
             .toBeNull()
+    })
+})
+
+describe('resolveTokenForServer', () => {
+    const credentials = (...pairs: [string, string][]): DevelocityAccessCredentials =>
+        DevelocityAccessCredentials.of(pairs.map(([hostname, key]) => ({hostname, key})))
+
+    it('returns the token matching the server host from a full URL', () => {
+        const tokens = credentials(['ge.example.com', 'key1'], ['other', 'key2'])
+        expect(resolveTokenForServer(tokens, 'https://ge.example.com')).toBe('key1')
+    })
+
+    it('matches on hostname, ignoring scheme, port and path', () => {
+        const tokens = credentials(['ge.example.com', 'key1'])
+        expect(resolveTokenForServer(tokens, 'https://ge.example.com:8443/path')).toBe('key1')
+    })
+
+    it('tolerates a bare hostname with no scheme', () => {
+        const tokens = credentials(['ge.example.com', 'key1'])
+        expect(resolveTokenForServer(tokens, 'ge.example.com')).toBe('key1')
+    })
+
+    it('selects the matching token when multiple are present', () => {
+        const tokens = credentials(['dev', 'key1'], ['ge.example.com', 'key2'])
+        expect(resolveTokenForServer(tokens, 'https://ge.example.com')).toBe('key2')
+    })
+
+    it('returns undefined when no token matches the server host', () => {
+        const tokens = credentials(['ge.example.com', 'key1'])
+        expect(resolveTokenForServer(tokens, 'https://other.example.com')).toBeUndefined()
+    })
+
+    it('returns undefined for an empty server URL', () => {
+        const tokens = credentials(['ge.example.com', 'key1'])
+        expect(resolveTokenForServer(tokens, '')).toBeUndefined()
+    })
+
+    it('returns undefined when there are no tokens', () => {
+        expect(resolveTokenForServer(credentials(), 'https://ge.example.com')).toBeUndefined()
     })
 })

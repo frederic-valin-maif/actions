@@ -3,28 +3,41 @@ import * as httpm from '@actions/http-client'
 import {DevelocityConfig} from '../configuration'
 import {recordDeprecation} from '../deprecation-collector'
 
-export async function setupToken(
-    develocityAccessKey: string,
-    develocityAllowUntrustedServer: boolean | undefined,
-    develocityTokenExpiry: string
-): Promise<void> {
-    if (develocityAccessKey) {
-        try {
-            core.debug('Fetching short-lived token...')
-            const tokens = await getToken(develocityAccessKey, develocityAllowUntrustedServer, develocityTokenExpiry)
-            if (tokens != null && !tokens.isEmpty()) {
-                core.debug(`Got token(s), setting the access key env vars`)
-                const token = tokens.raw()
-                core.setSecret(token)
-                exportAccessKeyEnvVars(token)
-            } else {
-                handleMissingAccessToken()
-            }
-        } catch (e) {
-            handleMissingAccessToken()
-            core.warning(`Failed to fetch short-lived token, reason: ${e}`)
-        }
+/**
+ * Exchange the configured Develocity access key(s) for short-lived tokens, export them as the access
+ * key env vars, and return the short-lived token matching the configured Develocity server URL (for
+ * use as the `develocityAccessToken` cache option). Returns `undefined` when there is no access key,
+ * token fetching fails, or no token matches the configured server.
+ */
+export async function setupToken(config: DevelocityConfig): Promise<string | undefined> {
+    const develocityAccessKey = config.getDevelocityAccessKey()
+    if (!develocityAccessKey) {
+        return undefined
     }
+    try {
+        core.debug('Fetching short-lived token...')
+        const tokens = await getToken(
+            develocityAccessKey,
+            config.getDevelocityAllowUntrustedServer(),
+            config.getDevelocityTokenExpiry()
+        )
+        if (tokens != null && !tokens.isEmpty()) {
+            core.debug(`Got token(s), setting the access key env vars`)
+            const token = tokens.raw()
+            core.setSecret(token)
+            exportAccessKeyEnvVars(token)
+            for (const k of tokens.keys) {
+                core.setSecret(k.key)
+            }
+            const serverUrl = config.getDevelocityUrl()
+            return serverUrl ? resolveTokenForServer(tokens, serverUrl) : undefined
+        }
+        handleMissingAccessToken()
+    } catch (e) {
+        handleMissingAccessToken()
+        core.warning(`Failed to fetch short-lived token, reason: ${e}`)
+    }
+    return undefined
 }
 
 function exportAccessKeyEnvVars(value: string): void {
@@ -173,4 +186,21 @@ export class DevelocityAccessCredentials {
     private static isValid(allKeys: string): boolean {
         return this.accessKeyRegexp.test(allKeys)
     }
+}
+
+/**
+ * Resolve the token whose hostname matches a given Develocity server URL. Returns `undefined`
+ * (fail-closed) when the server URL is empty or no token matches the server's host.
+ */
+export function resolveTokenForServer(tokens: DevelocityAccessCredentials, serverUrl: string): string | undefined {
+    if (!serverUrl) {
+        return undefined
+    }
+    let host: string
+    try {
+        host = new URL(serverUrl).hostname
+    } catch {
+        host = serverUrl // tolerate a bare hostname (no scheme)
+    }
+    return tokens.keys.find(k => k.hostname === host)?.key
 }
