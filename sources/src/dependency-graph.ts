@@ -4,6 +4,7 @@ import * as glob from '@actions/glob'
 import {DefaultArtifactClient} from '@actions/artifact'
 import {GitHub} from '@actions/github/lib/utils'
 import type {PullRequestEvent} from '@octokit/webhooks-types'
+import type {Endpoints} from '@octokit/types'
 
 import * as path from 'path'
 import fs from 'fs'
@@ -12,6 +13,10 @@ import {JobFailure} from './errors'
 import {DependencyGraphConfig, DependencyGraphOption, getGithubToken, getWorkspaceDirectory} from './configuration'
 
 const DEPENDENCY_GRAPH_PREFIX = 'dependency-graph_'
+
+type DependencyGraphSnapshotRequest = Endpoints['POST /repos/{owner}/{repo}/dependency-graph/snapshots']['parameters']
+
+type DependencyGraphSnapshotBody = Omit<DependencyGraphSnapshotRequest, 'owner' | 'repo'>
 
 export async function setup(config: DependencyGraphConfig): Promise<void> {
     const option = config.getDependencyGraphOption()
@@ -166,6 +171,13 @@ async function findDependencyGraphFiles(): Promise<string[]> {
 }
 
 async function uploadDependencyGraphs(dependencyGraphFiles: string[], config: DependencyGraphConfig): Promise<void> {
+    if (isRunningInGhesEnvironment()) {
+        core.info(
+            'Skipping dependency graph artifact upload on GHES because @actions/artifact v2+ is not supported there.'
+        )
+        return
+    }
+
     if (dependencyGraphFiles.length === 0) {
         core.info('No dependency graph files found to upload.')
         return
@@ -204,7 +216,11 @@ async function submitDependencyGraphs(dependencyGraphFiles: string[]): Promise<v
 
 function translateErrorMessage(jsonFile: string, error: Error): string {
     const relativeJsonFile = getRelativePathFromWorkspace(jsonFile)
-    const mainWarning = `Dependency submission failed for ${relativeJsonFile}.\n${error.message}`
+    const message =
+        typeof error.message === 'string' && error.message.trim().length > 0
+            ? error.message
+            : getHttpErrorFallbackMessage(error)
+    const mainWarning = `Dependency submission failed for ${relativeJsonFile}.\n${message}`
     if (error.message === 'Resource not accessible by integration') {
         return `${mainWarning}
 Please ensure that the 'contents: write' permission is available for the workflow job.
@@ -219,16 +235,23 @@ async function submitDependencyGraphFile(jsonFile: string): Promise<void> {
     const relativeJsonFile = getRelativePathFromWorkspace(jsonFile)
     core.info(`Reading dependency graph file: ${relativeJsonFile}`)
     const jsonContent = fs.readFileSync(jsonFile, 'utf8')
-    const jsonObject = parseDependencyGraphJson(jsonContent, relativeJsonFile)
-    jsonObject.owner = github.context.repo.owner
-    jsonObject.repo = github.context.repo.repo
+    const parsedJsonObject = parseDependencyGraphJson(jsonContent, relativeJsonFile)
+    assertDependencyGraphSnapshotBody(parsedJsonObject, relativeJsonFile)
+    const jsonObject: DependencyGraphSnapshotRequest = {
+        ...parsedJsonObject,
+        owner: github.context.repo.owner,
+        repo: github.context.repo.repo
+    }
 
     core.info(`Submitting dependency graph file: ${relativeJsonFile}`)
     try {
         const response = await octokit.request('POST /repos/{owner}/{repo}/dependency-graph/snapshots', jsonObject)
         core.notice(`Submitted ${relativeJsonFile}: ${response.data.message}`)
     } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error)
+        const errorMessage =
+            error instanceof Error && error.message.trim().length > 0
+                ? error.message
+                : getHttpErrorFallbackMessage(error)
         const status =
             typeof error === 'object' && error !== null && 'status' in error
                 ? String((error as {status?: unknown}).status)
@@ -256,6 +279,49 @@ function formatResponseData(responseData: unknown): string {
         return responseData
     }
     return JSON.stringify(responseData)
+}
+
+function getHttpErrorFallbackMessage(error: unknown): string {
+    const status =
+        typeof error === 'object' && error !== null && 'status' in error
+            ? (error as {status?: unknown}).status
+            : undefined
+    return status !== undefined
+        ? `HTTP request failed with status ${String(status)}`
+        : 'HTTP request failed with no message'
+}
+
+function assertDependencyGraphSnapshotBody(
+    value: Record<string, unknown>,
+    relativeJsonFile: string
+): asserts value is DependencyGraphSnapshotBody {
+    if (typeof value.version !== 'number') {
+        throw new Error(`Dependency graph file ${relativeJsonFile} is missing required numeric field 'version'.`)
+    }
+    if (!isObject(value.job) || typeof value.job.id !== 'string' || typeof value.job.correlator !== 'string') {
+        throw new Error(`Dependency graph file ${relativeJsonFile} is missing required object field 'job'.`)
+    }
+    if (typeof value.sha !== 'string') {
+        throw new Error(`Dependency graph file ${relativeJsonFile} is missing required string field 'sha'.`)
+    }
+    if (typeof value.ref !== 'string') {
+        throw new Error(`Dependency graph file ${relativeJsonFile} is missing required string field 'ref'.`)
+    }
+    if (
+        !isObject(value.detector) ||
+        typeof value.detector.name !== 'string' ||
+        typeof value.detector.version !== 'string' ||
+        typeof value.detector.url !== 'string'
+    ) {
+        throw new Error(`Dependency graph file ${relativeJsonFile} is missing required object field 'detector'.`)
+    }
+    if (typeof value.scanned !== 'string') {
+        throw new Error(`Dependency graph file ${relativeJsonFile} is missing required string field 'scanned'.`)
+    }
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
 function parseDependencyGraphJson(jsonContent: string, relativeJsonFile: string): Record<string, unknown> {
@@ -324,4 +390,9 @@ function getShaFromContext(): string {
 
 function isRunningInActEnvironment(): boolean {
     return process.env.ACT !== undefined
+}
+
+function isRunningInGhesEnvironment(): boolean {
+    const serverUrl = process.env.GITHUB_SERVER_URL
+    return typeof serverUrl === 'string' && serverUrl.length > 0 && serverUrl !== 'https://github.com'
 }
