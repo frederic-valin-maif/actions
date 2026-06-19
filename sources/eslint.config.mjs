@@ -1,6 +1,12 @@
 import globals from "globals";
 import typescriptParser from "@typescript-eslint/parser";
 import typescriptPlugin from "@typescript-eslint/eslint-plugin";
+import { serialize, deserialize } from "node:v8";
+
+if (typeof globalThis.structuredClone !== "function") {
+    // ESLint 10 uses structuredClone internally while evaluating rule options.
+    globalThis.structuredClone = (value) => deserialize(serialize(value));
+}
 
 export default {
 

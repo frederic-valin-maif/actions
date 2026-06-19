@@ -1,7 +1,12 @@
 import {createRequire} from 'node:module'
 
 const require = createRequire(import.meta.url)
-const develocityReporter = require.resolve('@gradle-tech/develocity-agent/jest-reporter')
+let develocityReporter
+try {
+  develocityReporter = require.resolve('@gradle-tech/develocity-agent/jest-reporter')
+} catch {
+  develocityReporter = null
+}
 
 export default {
   clearMocks: true,
@@ -15,6 +20,6 @@ export default {
   reporters: [
     'default',
     develocityReporter
-  ],
+  ].filter(Boolean),
   verbose: true
 }

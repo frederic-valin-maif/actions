@@ -216,16 +216,32 @@ Note that this permission is never available for a 'pull_request' trigger from a
 
 async function submitDependencyGraphFile(jsonFile: string): Promise<void> {
     const octokit = getOctokit()
+    const relativeJsonFile = getRelativePathFromWorkspace(jsonFile)
+    core.info(`Reading dependency graph file: ${relativeJsonFile}`)
     const jsonContent = fs.readFileSync(jsonFile, 'utf8')
-
-    const jsonObject = JSON.parse(jsonContent)
+    const jsonObject = parseDependencyGraphJson(jsonContent, relativeJsonFile)
     jsonObject.owner = github.context.repo.owner
     jsonObject.repo = github.context.repo.repo
-    const response = await octokit.request('POST /repos/{owner}/{repo}/dependency-graph/snapshots', jsonObject)
 
-    const relativeJsonFile = getRelativePathFromWorkspace(jsonFile)
+    core.info(`Submitting dependency graph file: ${relativeJsonFile}`)
+    const response = await octokit.request('POST /repos/{owner}/{repo}/dependency-graph/snapshots', jsonObject)
     core.notice(`Submitted ${relativeJsonFile}: ${response.data.message}`)
 }
+
+function parseDependencyGraphJson(jsonContent: string, relativeJsonFile: string): Record<string, unknown> {
+    try {
+        const parsed: unknown = JSON.parse(jsonContent)
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error('Expected top-level JSON object')
+        }
+        return parsed as Record<string, unknown>
+    } catch (error) {
+        throw new Error(
+            `Dependency graph file ${relativeJsonFile} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`
+        )
+    }
+}
+
 function getReportDirectory(): string {
     return process.env.DEPENDENCY_GRAPH_REPORT_DIR!
 }
