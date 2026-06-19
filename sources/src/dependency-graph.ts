@@ -228,6 +228,7 @@ async function submitDependencyGraphFile(jsonFile: string): Promise<void> {
         const response = await octokit.request('POST /repos/{owner}/{repo}/dependency-graph/snapshots', jsonObject)
         core.notice(`Submitted ${relativeJsonFile}: ${response.data.message}`)
     } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error)
         const status =
             typeof error === 'object' && error !== null && 'status' in error
                 ? String((error as {status?: unknown}).status)
@@ -236,13 +237,25 @@ async function submitDependencyGraphFile(jsonFile: string): Promise<void> {
             typeof error === 'object' && error !== null && 'response' in error
                 ? (error as {response?: {data?: unknown}}).response?.data
                 : undefined
+        const responseText = formatResponseData(responseData)
         core.warning(
-            `Failed to submit ${relativeJsonFile} (status: ${status}). Response: ${
-                responseData === undefined ? 'none' : JSON.stringify(responseData)
-            }`
+            `Failed to submit ${relativeJsonFile} (status: ${status}): ${errorMessage}. Response: ${responseText}`
         )
         throw error
     }
+}
+
+function formatResponseData(responseData: unknown): string {
+    if (responseData === undefined) {
+        return 'none'
+    }
+    if (typeof responseData === 'string' && responseData.length === 0) {
+        return 'empty string'
+    }
+    if (typeof responseData === 'string') {
+        return responseData
+    }
+    return JSON.stringify(responseData)
 }
 
 function parseDependencyGraphJson(jsonContent: string, relativeJsonFile: string): Record<string, unknown> {
